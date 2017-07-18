@@ -31,8 +31,11 @@ namespace Sokuhatiku.ChartRecordingTools
 		[SerializeField, Range(MIN_DRAWLIMIT, 10000), Header("Load reduction")]
 		private int drawsLimit = 100;
 
+        [SerializeField]
+        bool mobileMode = false;
+        const string SHADER_NAME_FOR_MOBILE = "UI/ChartRecorder/PlotterMobile";
 
-		public struct PointData
+        public struct PointData
 		{
 			public Vector2 pos;
 			public bool drawLine;
@@ -127,10 +130,21 @@ namespace Sokuhatiku.ChartRecordingTools
 				ptsCount = 0;
 			}
 
-			UpdateMaterialParameters();
-		}
+            UpdateMaterialParameters();
 
-		bool AddPoint(float time, float? data, ref bool connectPrev)
+            if (mobileMode)
+            {
+                var scope2local2world = UpdateMaterialParametersForMobile();//TODO: 上記とマージできるかもしれん
+                UpdateLineMeshForMobile(scope2local2world);
+            }
+		}
+        protected override void Awake()
+        {
+            base.Awake();
+            InitComponents();
+        }
+
+        bool AddPoint(float time, float? data, ref bool connectPrev)
 		{
 			if (data == null)
 			{
@@ -210,7 +224,161 @@ namespace Sokuhatiku.ChartRecordingTools
 			}
 		}
 
-		void CreateCapasityObject(int capasity)
+        void InitComponents()
+        {
+            if (mobileMode)
+            {
+                if (GetComponent<MeshFilter>() == null)
+                {
+                    gameObject.AddComponent<MeshFilter>();
+                }
+                if (GetComponent<MeshRenderer>() == null)
+                {
+                    var renderer = gameObject.AddComponent<MeshRenderer>();
+                    var shader = Shader.Find(SHADER_NAME_FOR_MOBILE);
+                    renderer.material = new Material(shader);
+                }
+
+                dummyMesh = null;
+
+                GetComponent<MeshRenderer>().sortingOrder = 1;
+            }
+            else 
+            {
+                if (GetComponent<MeshFilter>() != null)
+                {
+                    DestroyImmediate(GetComponent<MeshFilter>());
+                }
+                if (GetComponent<MeshRenderer>() != null)
+                {
+                    DestroyImmediate(GetComponent<MeshRenderer>());
+                }
+            }
+        }
+
+        Matrix4x4 UpdateMaterialParametersForMobile()
+        {
+            var renderer = GetComponent<MeshRenderer>();
+            if (renderer == null || renderer.sharedMaterial == null) return new Matrix4x4();
+
+            var sharedMaterial = renderer.sharedMaterial;
+
+            sharedMaterial.SetColor("_Color", color);
+
+            var scope2Local =
+                Matrix4x4.TRS(
+                    Vector2.Scale(Scope2RectTransration, Scope2RectScale) + Scope2RectOffset,
+                    Quaternion.identity,
+                    Scope2RectScale);
+
+            sharedMaterial.SetMatrix("_S2LMatrix", scope2Local);
+
+            var local2World = rectTransform.localToWorldMatrix;
+            sharedMaterial.SetMatrix("_L2WMatrix", local2World);
+
+            var maskRect = rectTransform.rect;
+            sharedMaterial.SetVector("_ClippingRect", new Vector4(maskRect.xMin, maskRect.yMin, maskRect.xMax, maskRect.yMax));
+
+            renderer.sharedMaterial = sharedMaterial;
+
+            return local2World * scope2Local;
+        }
+
+        void UpdateLineMeshForMobile(Matrix4x4 scope2local2world)
+        {
+            if (datas == null || GetComponent<MeshFilter>() == null) return;
+
+            var triangleList = new System.Collections.Generic.List<int>();
+            var vertexList = new System.Collections.Generic.List<Vector3>();
+
+            int vertexIndex = 0;
+
+            for (int i = 2; i < datas.Length - 1; i++)
+            {
+                if (!datas[i-1].drawLine || !datas[i].drawLine) continue;
+                if (datas[i - 1].pos.x > datas[i].pos.x) continue;
+
+                int[] indexes = new int[]
+                {
+                    vertexIndex + 0, vertexIndex + 2, vertexIndex + 1,
+                    vertexIndex + 0, vertexIndex + 3, vertexIndex + 2,
+                };
+                var vertices = CreateLineVertex(datas[i - 1].pos, datas[i].pos, size/ 25, scope2local2world);
+
+                //追加
+                triangleList.AddRange(indexes);
+                vertexList.AddRange(vertices);
+
+                vertexIndex += 4;
+            }
+
+            if (vertexList.Count == 0 || triangleList.Count == 0) return;
+
+            var filter = GetComponent<MeshFilter>();
+            var mesh = new Mesh();
+            {
+                mesh.vertices = vertexList.ToArray();
+                mesh.triangles = triangleList.ToArray();
+                mesh.RecalculateNormals();
+                mesh.RecalculateBounds();
+                mesh.RecalculateTangents();
+            }
+            filter.sharedMesh = mesh;
+        }
+
+        Vector3[] CreateLineVertex(Vector2 start, Vector2 end, float width, Matrix4x4 scope2local2world)
+        {
+            Vector3[] vertices = new Vector3[4];
+
+            //座標変換する
+            var startVec4 = scope2local2world * new Vector4(start.x, start.y, 0, 1);
+            var endVec4 = scope2local2world * new Vector4(end.x, end.y, 0, 1);
+
+            startVec4 /= startVec4.w;
+            endVec4 /= endVec4.w;
+
+            //ベクトルを求める
+            var vec = (endVec4 - startVec4).normalized;
+
+            //距離を求める
+            var len = (endVec4 - startVec4).magnitude;
+
+            //垂直ベクトルを求めていく
+
+            //v0: 90度回転
+            vertices[0].x = startVec4.x - vec.y * width / 2;
+            vertices[0].y = startVec4.y + vec.x * width / 2;
+            vertices[0].z = startVec4.z;
+
+            //v1: -90度回転
+            vertices[1].x = startVec4.x + vec.y * width / 2;
+            vertices[1].y = startVec4.y - vec.x * width / 2;
+            vertices[1].z = startVec4.z;
+
+            //v2: -90度回転
+            vertices[2].x = endVec4.x + vec.y * width / 2;
+            vertices[2].y = endVec4.y - vec.x * width / 2;
+            vertices[2].z = endVec4.z;
+
+            //v3: 90度回転
+            vertices[3].x = endVec4.x - vec.y * width / 2;
+            vertices[3].y = endVec4.y + vec.x * width / 2;
+            vertices[3].z = endVec4.z;
+
+            //距離が短すぎる場合の対応
+            if (len < width && false)
+            {
+                vertices[0] = vertices[0] + new Vector3(-vec.x, -vec.y, 0) * width;
+                vertices[1] = vertices[1] + new Vector3(-vec.x, -vec.y, 0) * width;
+                vertices[2] = vertices[2] + new Vector3(vec.x, vec.y, 0) * width;
+                vertices[3] = vertices[3] + new Vector3(vec.x, vec.y, 0) * width;
+            }
+
+            return vertices;
+        }
+
+
+        void CreateCapasityObject(int capasity)
 		{
 			dummyMesh = new Mesh();
 			var meshvarts = capasity * 3;
